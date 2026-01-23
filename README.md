@@ -1,4 +1,4 @@
-# AML Homework 4 – Finance RAG, LoRA, MCP Tools
+# Finance RAG, LoRA, MCP Tools
 
 ## Overview
 - **RAG demo** (`finance_rag.py`): Uses a curated set of finance Q&A pairs, embeds the questions, and returns the nearest answer via FAISS.
