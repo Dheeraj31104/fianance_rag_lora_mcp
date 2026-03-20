@@ -13,7 +13,7 @@
 1) Clone and install deps (Python 3.10+ recommended):
 ```bash
 git clone https://github.com/Dheeraj31104/fianance_rag_lora_mcp.git
-cd aml_homework_4
+cd fianance_rag_lora_mcp
 pip install -r requirements.txt  # or pip install transformers datasets sentence-transformers faiss-cpu peft torch yfinance beautifulsoup4 requests
 ```
 
