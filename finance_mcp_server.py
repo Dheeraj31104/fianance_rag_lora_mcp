@@ -4,228 +4,320 @@ MCP Server with Finance Tools
 Run: python finance_mcp_server.py
 """
 
+from __future__ import annotations
+
 import json
 import sys
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any
+from urllib.parse import quote
+
 import requests
 from bs4 import BeautifulSoup
-from typing import Any, Dict
+
+from finance_rag import RETRIEVER_NAME, build_rag
+
+
+@dataclass(frozen=True)
+class RegisteredTool:
+    function: Callable[..., dict[str, Any]]
+    description: str
+    input_schema: dict[str, Any]
+
 
 class FinanceMCPServer:
-    """MCP Server with 3 finance tools"""
-    
-    def __init__(self, name: str):
+    """Minimal JSON-RPC server for finance tools."""
+
+    def __init__(self, name: str, version: str = "1.0.0"):
         self.name = name
-        self.tools = {}
-    
-    def register_tool(self, func, description: str, input_schema: Dict[str, Any]):
-        """Register a tool"""
-        self.tools[func.__name__] = {
-            "function": func,
-            "description": description,
-            "input_schema": input_schema
-        }
-    
-    def list_tools(self) -> list:
-        """List available tools"""
-        tools_list = []
-        for name, info in self.tools.items():
-            tools_list.append({
+        self.version = version
+        self.tools: dict[str, RegisteredTool] = {}
+
+    def register_tool(
+        self,
+        func: Callable[..., dict[str, Any]],
+        description: str,
+        input_schema: dict[str, Any],
+    ) -> None:
+        self.tools[func.__name__] = RegisteredTool(
+            function=func,
+            description=description,
+            input_schema=input_schema,
+        )
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
                 "name": name,
-                "description": info["description"],
-                "inputSchema": info["input_schema"]
-            })
-        return tools_list
-    
-    def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
-        """Call a tool"""
-        if tool_name not in self.tools:
+                "description": tool.description,
+                "inputSchema": tool.input_schema,
+            }
+            for name, tool in self.tools.items()
+        ]
+
+    def call_tool(self, tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+        tool = self.tools.get(tool_name)
+        if tool is None:
             return {"error": f"Unknown tool: {tool_name}"}
-        
+        if arguments is None:
+            arguments = {}
+        if not isinstance(arguments, dict):
+            return {"error": "Tool arguments must be a JSON object"}
+
         try:
-            tool_func = self.tools[tool_name]["function"]
-            result = tool_func(**arguments)
-            return result
-        except Exception as e:
-            return {"error": f"Tool error: {str(e)}"}
-    
+            return tool.function(**arguments)
+        except TypeError as exc:
+            return {"error": f"Invalid arguments for '{tool_name}': {exc}"}
+        except Exception as exc:  # pragma: no cover
+            return {"error": f"Tool error: {exc}"}
+
     def handle_request(self, request_str: str) -> str:
-        """Handle JSON-RPC request"""
         try:
             request = json.loads(request_str)
-        except:
-            return json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}})
-        
+        except json.JSONDecodeError:
+            return json.dumps(
+                {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}}
+            )
+
         request_id = request.get("id")
-        method = request.get("method", "")
+        method = request.get("method")
         params = request.get("params", {})
-        
-        response = {"jsonrpc": "2.0", "id": request_id}
-        
-        if method == "tools/list":
+
+        if not isinstance(params, dict):
+            return json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {"code": -32602, "message": "Invalid params"},
+                }
+            )
+
+        response: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
+
+        if method == "initialize":
+            response["result"] = {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": self.name, "version": self.version},
+            }
+        elif method == "tools/list":
             response["result"] = {"tools": self.list_tools()}
         elif method == "tools/call":
             tool_name = params.get("name", "")
             arguments = params.get("arguments", {})
-            result = self.call_tool(tool_name, arguments)
-            response["result"] = result
-        elif method == "initialize":
-            response["result"] = {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": self.name, "version": "1.0.0"}}
+            response["result"] = self.call_tool(tool_name, arguments)
         else:
             response["error"] = {"code": -32601, "message": "Method not found"}
-        
+
         return json.dumps(response)
-    
-    def run(self):
-        """Run server"""
-        sys.stderr.write(f"\n{'='*70}\n")
-        sys.stderr.write(f"  MCP SERVER: Finance Tools\n")
-        sys.stderr.write(f"{'='*70}\n\n")
-        sys.stderr.write(f"Available Tools:\n")
-        sys.stderr.write(f"  1. get_stock_price(symbol) - Real stock prices\n")
-        sys.stderr.write(f"  2. scrape_finance_news(topic) - Finance news scraping\n")
-        sys.stderr.write(f"  3. calculate_investment(initial, rate, years) - Investment math\n\n")
-        sys.stderr.write(f"Starting MCP server...\n")
-        sys.stderr.write(f"{'-'*70}\n\n")
+
+    def run(self) -> None:
+        sys.stderr.write(f"\n{'=' * 70}\n")
+        sys.stderr.write("  MCP SERVER: Finance Tools\n")
+        sys.stderr.write(f"{'=' * 70}\n\n")
+        sys.stderr.write("Available Tools:\n")
+        sys.stderr.write("  1. get_stock_price(symbol) - Real stock prices\n")
+        sys.stderr.write("  2. scrape_finance_news(topic) - Finance topic lookup\n")
+        sys.stderr.write("  3. calculate_investment(initial, annual_rate, years) - Investment math\n")
+        sys.stderr.write("  4. answer_finance_question(query) - Shared RAG answer\n\n")
+        sys.stderr.write("Starting MCP server...\n")
+        sys.stderr.write(f"{'-' * 70}\n\n")
         sys.stderr.flush()
-        
+
         try:
-            while True:
-                line = sys.stdin.readline()
+            for line in sys.stdin:
+                line = line.strip()
                 if not line:
-                    break
-                response = self.handle_request(line.strip())
-                sys.stdout.write(response + "\n")
+                    continue
+                sys.stdout.write(self.handle_request(line) + "\n")
                 sys.stdout.flush()
         except KeyboardInterrupt:
             pass
 
-# ============================================================================
-# TOOL 1: Get Stock Price
-# ============================================================================
 
-def get_stock_price(symbol: str) -> Dict[str, Any]:
-    """Get real-time stock price"""
+def get_stock_price(symbol: str) -> dict[str, Any]:
+    """Get recent stock pricing data from Yahoo Finance."""
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol:
+        return {"error": "Symbol is required"}
+
     try:
         import yfinance as yf
-        
-        stock = yf.Ticker(symbol.upper())
+    except ImportError:
+        return {"error": "yfinance not installed"}
+
+    try:
+        stock = yf.Ticker(normalized_symbol)
         hist = stock.history(period="5d")
-        
         if hist.empty:
-            return {"error": f"Stock '{symbol}' not found"}
-        
-        current_price = hist["Close"].iloc[-1]
-        previous_price = hist["Close"].iloc[-2]
+            return {"error": f"Stock '{normalized_symbol}' not found"}
+
+        closes = hist["Close"].dropna()
+        if closes.empty:
+            return {"error": f"No closing price data available for '{normalized_symbol}'"}
+
+        current_price = float(closes.iloc[-1])
+        previous_price = float(closes.iloc[-2]) if len(closes) > 1 else current_price
         change = current_price - previous_price
-        change_percent = (change / previous_price) * 100
-        
-        return {
-            "symbol": symbol.upper(),
+        change_percent = 0.0 if previous_price == 0 else (change / previous_price) * 100
+
+        info = stock.info or {}
+        result = {
+            "symbol": normalized_symbol,
             "current_price": round(current_price, 2),
             "change": round(change, 2),
             "change_percent": round(change_percent, 2),
-            "52_week_high": round(stock.info.get("fiftyTwoWeekHigh", 0), 2),
-            "52_week_low": round(stock.info.get("fiftyTwoWeekLow", 0), 2),
         }
-    except ImportError:
-        return {"error": "yfinance not installed"}
-    except Exception as e:
-        return {"error": str(e)}
 
-# ============================================================================
-# TOOL 2: Scrape Finance News (Web Scraping!)
-# ============================================================================
+        fifty_two_week_high = info.get("fiftyTwoWeekHigh")
+        fifty_two_week_low = info.get("fiftyTwoWeekLow")
+        if fifty_two_week_high is not None:
+            result["52_week_high"] = round(float(fifty_two_week_high), 2)
+        if fifty_two_week_low is not None:
+            result["52_week_low"] = round(float(fifty_two_week_low), 2)
 
-def scrape_finance_news(topic: str) -> Dict[str, Any]:
-    """Scrape finance news from Wikipedia"""
+        return result
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def scrape_finance_news(topic: str) -> dict[str, Any]:
+    """Fetch a short finance topic summary from Wikipedia."""
+    normalized_topic = topic.strip()
+    if not normalized_topic:
+        return {"error": "Topic is required"}
+
+    url = f"https://en.wikipedia.org/wiki/{quote(normalized_topic.replace(' ', '_'))}"
+    headers = {
+        "User-Agent": "FinanceMCPServer/1.0 (+https://en.wikipedia.org/wiki/Main_Page)"
+    }
+
     try:
-        url = f"https://en.wikipedia.org/wiki/{topic.replace(' ', '_')}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
         response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code != 200:
-            return {"error": f"Topic '{topic}' not found"}
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Get title
-        title = soup.find('h1', class_='firstHeading')
-        title_text = title.get_text() if title else topic
-        
-        # Get content
-        content_div = soup.find('div', id='mw-content-text')
-        paragraphs = content_div.find_all('p')
-        content = ' '.join([p.get_text() for p in paragraphs[:5]])
-        content = ' '.join(content.split())
-        
-        return {
-            "topic": title_text,
-            "url": url,
-            "content": content[:500],
-            "length": len(content)
-        }
-        
-    except Exception as e:
-        return {"error": f"Scraping failed: {str(e)}"}
+    except requests.RequestException as exc:
+        return {"error": f"Request failed: {exc}"}
 
-# ============================================================================
-# TOOL 3: Calculate Investment Returns
-# ============================================================================
+    if response.status_code == 404:
+        return {"error": f"Topic '{normalized_topic}' not found"}
+    if response.status_code != 200:
+        return {"error": f"Wikipedia request failed with status {response.status_code}"}
 
-def calculate_investment(initial: float, annual_rate: float, years: int) -> Dict[str, Any]:
-    """Calculate compound investment returns"""
+    soup = BeautifulSoup(response.content, "html.parser")
+    title = soup.find("h1", class_="firstHeading")
+    content_div = soup.find("div", id="mw-content-text")
+    if content_div is None:
+        return {"error": "Could not locate article content"}
+
+    paragraphs = [
+        paragraph.get_text(" ", strip=True)
+        for paragraph in content_div.find_all("p")
+        if paragraph.get_text(strip=True)
+    ]
+    if not paragraphs:
+        return {"error": f"No article content found for '{normalized_topic}'"}
+
+    content = " ".join(paragraphs[:3])
+    content = " ".join(content.split())
+
+    return {
+        "topic": title.get_text(strip=True) if title else normalized_topic,
+        "url": url,
+        "content": content[:500],
+        "length": len(content),
+    }
+
+
+def calculate_investment(initial: float, annual_rate: float, years: int) -> dict[str, Any]:
+    """Calculate annual compounding for an investment."""
+    if initial <= 0:
+        return {"error": "Initial investment must be greater than 0"}
+    if years <= 0:
+        return {"error": "Years must be greater than 0"}
+
+    rate_decimal = annual_rate / 100
+    final_amount = initial * ((1 + rate_decimal) ** years)
+    total_gain = final_amount - initial
+
+    return {
+        "initial": initial,
+        "rate_percent": annual_rate,
+        "years": years,
+        "final_amount": round(final_amount, 2),
+        "total_gain": round(total_gain, 2),
+        "total_return_percent": round((total_gain / initial) * 100, 2),
+    }
+
+
+@lru_cache(maxsize=1)
+def get_shared_rag():
+    return build_rag()
+
+
+def answer_finance_question(query: str) -> dict[str, Any]:
+    """Answer a finance question using the shared RAG pipeline."""
+    normalized_query = query.strip()
+    if not normalized_query:
+        return {"error": "Query is required"}
+
     try:
-        if initial <= 0 or years <= 0:
-            return {"error": "Invalid input"}
-        
-        rate_decimal = annual_rate / 100
-        final_amount = initial * ((1 + rate_decimal) ** years)
-        total_gain = final_amount - initial
-        
-        return {
-            "initial": initial,
-            "rate_percent": annual_rate,
-            "years": years,
-            "final_amount": round(final_amount, 2),
-            "total_gain": round(total_gain, 2),
-            "total_return_percent": round((total_gain / initial) * 100, 2)
-        }
-    except Exception as e:
-        return {"error": str(e)}
+        result = get_shared_rag().answer_question(normalized_query)
+        result["model"] = RETRIEVER_NAME
+        result["source"] = "shared_rag"
+        return result
+    except Exception as exc:
+        return {"error": f"RAG answer failed: {exc}"}
 
-# ============================================================================
-# Main
-# ============================================================================
 
-if __name__ == "__main__":
+def create_server() -> FinanceMCPServer:
     server = FinanceMCPServer("Finance MCP Server")
-    
-    # Register tools
     server.register_tool(
         get_stock_price,
-        "Get real-time stock price",
-        {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}
+        "Get recent stock price data",
+        {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
     )
-    
     server.register_tool(
         scrape_finance_news,
-        "Scrape finance topic from Wikipedia",
-        {"type": "object", "properties": {"topic": {"type": "string"}}, "required": ["topic"]}
+        "Fetch a short finance topic summary from Wikipedia",
+        {
+            "type": "object",
+            "properties": {"topic": {"type": "string"}},
+            "required": ["topic"],
+        },
     )
-    
     server.register_tool(
         calculate_investment,
         "Calculate investment returns",
-        {"type": "object", "properties": {
-            "initial": {"type": "number"},
-            "annual_rate": {"type": "number"},
-            "years": {"type": "integer"}
-        }, "required": ["initial", "annual_rate", "years"]}
+        {
+            "type": "object",
+            "properties": {
+                "initial": {"type": "number"},
+                "annual_rate": {"type": "number"},
+                "years": {"type": "integer"},
+            },
+            "required": ["initial", "annual_rate", "years"],
+        },
     )
-    
-    # Run
-    server.run()
+    server.register_tool(
+        answer_finance_question,
+        "Answer a finance question using the shared RAG pipeline",
+        {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    )
+    return server
+
+
+def main() -> None:
+    create_server().run()
+
+
+if __name__ == "__main__":
+    main()

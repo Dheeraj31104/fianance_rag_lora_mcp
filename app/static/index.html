@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Finance Analytics Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <div>
+        <p class="eyebrow">Finance Analytics Platform</p>
+        <h1>Portfolio P&amp;L, risk, events, and AI commentary in one surface.</h1>
+        <p class="lede">Live API-backed prototype combining deterministic analytics, event retrieval, stock drilldowns, MCP actions, and contextual chat.</p>
+      </div>
+      <div class="hero-card">
+        <div class="metric-label">Daily P&amp;L</div>
+        <div class="metric-value" id="daily-pnl">$0</div>
+        <div class="metric-footnote" id="nav-footnote">Loading snapshot...</div>
+      </div>
+    </section>
+
+    <section class="stats-grid">
+      <article class="card stat-card"><div class="metric-label">NAV</div><div class="stat-value" id="nav">$0</div></article>
+      <article class="card stat-card"><div class="metric-label">Cash</div><div class="stat-value" id="cash">$0</div></article>
+      <article class="card stat-card"><div class="metric-label">Daily Return</div><div class="stat-value" id="daily-return">0%</div></article>
+      <article class="card stat-card"><div class="metric-label">Unrealized P&amp;L</div><div class="stat-value" id="unrealized-pnl">$0</div></article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Positions</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Symbol</th><th>Qty</th><th>Price</th><th>Avg Cost</th><th>Sector</th></tr></thead>
+            <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>P&amp;L Attribution</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Symbol</th><th>Value</th><th>Unrealized P&amp;L</th><th>Return %</th><th>Weight %</th></tr></thead>
+            <tbody id="pnl-body"></tbody>
+          </table>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>Risk &amp; Stress</h2>
+        <div class="risk-list" id="risk-summary"></div>
+        <h3>Stress Scenarios</h3>
+        <ul class="event-list" id="stress-list"></ul>
+      </article>
+
+      <article class="card">
+        <h2>Allocation Visual</h2>
+        <svg id="allocation-chart" class="chart" viewBox="0 0 360 220" role="img" aria-label="Sector allocation chart"></svg>
+        <ul class="event-list compact" id="allocation-list"></ul>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Stock Drilldown</h2>
+        <label class="field-label" for="symbol-picker">Stock</label>
+        <select id="symbol-picker">
+          <option value="AAPL">AAPL</option>
+          <option value="MSFT">MSFT</option>
+          <option value="TSLA">TSLA</option>
+        </select>
+        <div id="drilldown-overview" class="risk-list"></div>
+        <svg id="price-chart" class="chart" viewBox="0 0 360 180" role="img" aria-label="Price history chart"></svg>
+        <ul class="event-list" id="events-list"></ul>
+      </article>
+
+      <article class="card">
+        <h2>MCP Actions</h2>
+        <div class="chip-row">
+          <button class="chip action-chip" type="button" data-tool="get_portfolio_snapshot">Portfolio Snapshot</button>
+          <button class="chip action-chip" type="button" data-tool="get_risk_report">Risk Report</button>
+          <button class="chip action-chip" type="button" data-tool="generate_portfolio_commentary">Portfolio Commentary</button>
+        </div>
+        <div class="mcp-panel">
+          <div class="metric-label">Latest MCP Result</div>
+          <pre id="mcp-output" class="pre-box">Run an action to inspect the tool output.</pre>
+        </div>
+      </article>
+    </section>
+
+    <section class="grid">
+      <article class="card">
+        <h2>Portfolio Commentary</h2>
+        <p id="commentary-summary" class="body-copy">Loading commentary...</p>
+        <h3>Drivers</h3>
+        <ul class="event-list" id="drivers-list"></ul>
+        <h3>Watch Items</h3>
+        <ul class="event-list" id="watch-list"></ul>
+      </article>
+
+      <article class="card">
+        <h2>Portfolio Chat</h2>
+        <p class="body-copy">Ask the dashboard why the portfolio is moving, where the risk sits, or what matters for the selected stock.</p>
+        <div class="chip-row">
+          <button class="chip chat-chip" type="button" data-query="Why is my portfolio moving today?">Why is it moving?</button>
+          <button class="chip chat-chip" type="button" data-query="What is the biggest risk in this portfolio?">Biggest risk</button>
+          <button class="chip chat-chip" type="button" data-query="What matters for the selected stock right now?">Selected stock</button>
+          <button class="chip chat-chip" type="button" data-query="Explain concentration risk in this portfolio.">Concentration</button>
+        </div>
+        <div id="chat-thread" class="chat-thread"></div>
+        <label class="field-label" for="qa-input">Ask the portfolio assistant</label>
+        <div class="qa-row">
+          <input id="qa-input" type="text" value="Why is my portfolio moving today?">
+          <button id="qa-button" type="button">Send</button>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+    const percent = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const dashboardContext = { selectedSymbol: "AAPL" };
+
+    function renderRows(targetId, rows, renderer) {
+      document.getElementById(targetId).innerHTML = rows.map(renderer).join("");
+    }
+
+    function appendChatMessage(role, text, citations = []) {
+      const thread = document.getElementById("chat-thread");
+      const citationHtml = citations.length ? `<div class="chat-citations">${citations.map((item) => `<span>${item}</span>`).join("")}</div>` : "";
+      thread.insertAdjacentHTML("beforeend", `<div class="chat-message ${role}"><div class="chat-role">${role === "user" ? "You" : "Assistant"}</div><div class="chat-text">${text}</div>${citationHtml}</div>`);
+      thread.scrollTop = thread.scrollHeight;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const response = await fetch(url, options);
+      if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+      return response.json();
+    }
+
+    function drawAllocationChart(items) {
+      const svg = document.getElementById("allocation-chart");
+      const maxWeight = Math.max(...items.map((item) => item.weight_pct), 1);
+      const bars = items.map((item, index) => {
+        const width = (item.weight_pct / maxWeight) * 220;
+        const y = 28 + index * 54;
+        const colors = ["#0f766e", "#1d4ed8", "#b45309", "#7c3aed"];
+        return `
+          <text x="14" y="${y + 16}" class="svg-label">${item.sector}</text>
+          <rect x="120" y="${y}" width="${width}" height="24" rx="10" fill="${colors[index % colors.length]}"></rect>
+          <text x="${130 + width}" y="${y + 16}" class="svg-value">${item.weight_pct.toFixed(2)}%</text>
+        `;
+      }).join("");
+      svg.innerHTML = bars;
+      document.getElementById("allocation-list").innerHTML = items.map((item) => `<li><strong>${item.sector}</strong><span>${currency.format(item.market_value)}</span></li>`).join("");
+    }
+
+    function drawPriceChart(prices) {
+      const svg = document.getElementById("price-chart");
+      const min = Math.min(...prices);
+      const max = Math.max(...prices);
+      const span = Math.max(max - min, 1);
+      const points = prices.map((price, index) => {
+        const x = 20 + index * 80;
+        const y = 150 - ((price - min) / span) * 110;
+        return `${x},${y}`;
+      }).join(" ");
+      svg.innerHTML = `
+        <polyline points="${points}" fill="none" stroke="#0f766e" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></polyline>
+        ${prices.map((price, index) => {
+          const x = 20 + index * 80;
+          const y = 150 - ((price - min) / span) * 110;
+          return `<circle cx="${x}" cy="${y}" r="5" fill="#1d4ed8"></circle><text x="${x - 12}" y="170" class="svg-axis">T${index + 1}</text>`;
+        }).join("")}
+      `;
+    }
+
+    async function loadSnapshot() {
+      const snapshot = await fetchJson("/portfolio/snapshot");
+      document.getElementById("daily-pnl").textContent = currency.format(snapshot.daily_pnl);
+      document.getElementById("nav-footnote").textContent = `NAV ${currency.format(snapshot.nav)} | Cash ${currency.format(snapshot.cash)}`;
+      document.getElementById("nav").textContent = currency.format(snapshot.nav);
+      document.getElementById("cash").textContent = currency.format(snapshot.cash);
+      document.getElementById("daily-return").textContent = `${percent.format(snapshot.daily_return_pct)}%`;
+    }
+
+    async function loadPositions() {
+      const positions = await fetchJson("/portfolio/positions");
+      renderRows("positions-body", positions, (position) => `<tr><td>${position.symbol}</td><td>${position.quantity}</td><td>${currency.format(position.current_price)}</td><td>${currency.format(position.avg_cost)}</td><td>${position.sector}</td></tr>`);
+    }
+
+    async function loadPnL() {
+      const pnl = await fetchJson("/portfolio/pnl");
+      document.getElementById("unrealized-pnl").textContent = currency.format(pnl.total_unrealized_pnl);
+      renderRows("pnl-body", pnl.positions, (row) => `<tr><td>${row.symbol}</td><td>${currency.format(row.market_value)}</td><td>${currency.format(row.unrealized_pnl)}</td><td>${percent.format(row.unrealized_return_pct)}%</td><td>${percent.format(row.contribution_pct)}%</td></tr>`);
+    }
+
+    async function loadRisk() {
+      const risk = await fetchJson("/risk/report");
+      document.getElementById("risk-summary").innerHTML = `<div><strong>Largest position:</strong> ${risk.largest_position}</div><div><strong>Largest sector:</strong> ${risk.largest_sector}</div><div><strong>Concentration:</strong> ${percent.format(risk.concentration_pct)}%</div>`;
+      document.getElementById("stress-list").innerHTML = risk.stress_results.map((item) => `<li><strong>${item.scenario}</strong><span>${currency.format(item.estimated_pnl)}</span></li>`).join("");
+    }
+
+    async function loadAllocation() {
+      const allocation = await fetchJson("/portfolio/allocation");
+      drawAllocationChart(allocation);
+    }
+
+    async function loadDrilldown(symbol) {
+      dashboardContext.selectedSymbol = symbol;
+      const drilldown = await fetchJson(`/stocks/${symbol}/drilldown`);
+      const overview = drilldown.overview;
+      document.getElementById("drilldown-overview").innerHTML = `
+        <div><strong>${overview.symbol}</strong> ${currency.format(overview.price)} (${percent.format(overview.change_pct)}%)</div>
+        <div><strong>P/E:</strong> ${overview.pe_ratio}</div>
+        <div><strong>Beta:</strong> ${overview.beta}</div>
+        <div><strong>Portfolio Qty:</strong> ${drilldown.portfolio_position.quantity}</div>
+      `;
+      drawPriceChart(drilldown.price_history);
+      document.getElementById("events-list").innerHTML = drilldown.events.map((event) => `<li><strong>${event.symbol}</strong><span>${event.headline}</span></li>`).join("");
+    }
+
+    async function loadCommentary() {
+      const commentary = await fetchJson("/commentary/portfolio", { method: "POST" });
+      document.getElementById("commentary-summary").textContent = commentary.summary;
+      document.getElementById("drivers-list").innerHTML = commentary.drivers.map((item) => `<li>${item}</li>`).join("");
+      document.getElementById("watch-list").innerHTML = commentary.watch_items.map((item) => `<li>${item}</li>`).join("");
+    }
+
+    async function runChat(message = null) {
+      const userQuestion = message || document.getElementById("qa-input").value.trim();
+      if (!userQuestion) return;
+      appendChatMessage("user", userQuestion);
+      document.getElementById("qa-input").value = "";
+      const result = await fetchJson("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userQuestion, symbol: dashboardContext.selectedSymbol }),
+      });
+      appendChatMessage("assistant", result.answer || "No answer returned.", result.citations || []);
+    }
+
+    async function runMcpAction(tool) {
+      const args = tool === "answer_finance_question"
+        ? { query: "What is portfolio diversification?" }
+        : {};
+      const result = await fetchJson("/mcp/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool, args }),
+      });
+      document.getElementById("mcp-output").textContent = JSON.stringify(result.result, null, 2);
+    }
+
+    async function boot() {
+      try {
+        await Promise.all([loadSnapshot(), loadPositions(), loadPnL(), loadRisk(), loadAllocation(), loadCommentary()]);
+        await loadDrilldown(document.getElementById("symbol-picker").value);
+        await runChat("Why is my portfolio moving today?");
+      } catch (error) {
+        console.error(error);
+        document.getElementById("commentary-summary").textContent = error.message;
+      }
+    }
+
+    document.getElementById("symbol-picker").addEventListener("change", (event) => loadDrilldown(event.target.value));
+    document.getElementById("qa-button").addEventListener("click", () => runChat());
+    document.getElementById("qa-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        runChat();
+      }
+    });
+    document.querySelectorAll(".chat-chip").forEach((button) => {
+      button.addEventListener("click", () => runChat(button.dataset.query));
+    });
+    document.querySelectorAll(".action-chip").forEach((button) => {
+      button.addEventListener("click", () => runMcpAction(button.dataset.tool));
+    });
+    boot();
+  </script>
+</body>
+</html>
