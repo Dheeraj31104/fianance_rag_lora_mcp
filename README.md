@@ -67,6 +67,10 @@ Dashboard / API / MCP tools
 
 This flow is the core product architecture. It ensures the system does not ask a model to do the work of a pricing engine, risk engine, or portfolio accounting layer.
 
+### Architecture Diagram
+
+![Financial Insight System Architecture Flow](image.png)
+
 ---
 
 ## Architecture Principles
