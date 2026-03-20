@@ -78,15 +78,16 @@
       </article>
 
       <article class="card">
-        <h2>MCP Actions</h2>
+        <h2>External MCP Actions</h2>
+        <p class="body-copy">These buttons call the standalone <code>finance_mcp_server.py</code> process through the app's external MCP client.</p>
         <div class="chip-row">
-          <button class="chip action-chip" type="button" data-tool="get_portfolio_snapshot">Portfolio Snapshot</button>
-          <button class="chip action-chip" type="button" data-tool="get_risk_report">Risk Report</button>
-          <button class="chip action-chip" type="button" data-tool="generate_portfolio_commentary">Portfolio Commentary</button>
+          <button class="chip action-chip" type="button" data-tool="get_stock_price">Stock Price</button>
+          <button class="chip action-chip" type="button" data-tool="calculate_investment">Investment Math</button>
+          <button class="chip action-chip" type="button" data-tool="answer_finance_question">Finance Q&A</button>
         </div>
         <div class="mcp-panel">
-          <div class="metric-label">Latest MCP Result</div>
-          <pre id="mcp-output" class="pre-box">Run an action to inspect the tool output.</pre>
+          <div class="metric-label">Latest External MCP Result</div>
+          <pre id="mcp-output" class="pre-box">Run an external MCP action to inspect the tool output.</pre>
         </div>
       </article>
     </section>
@@ -245,10 +246,15 @@
     }
 
     async function runMcpAction(tool) {
-      const args = tool === "answer_finance_question"
-        ? { query: "What is portfolio diversification?" }
-        : {};
-      const result = await fetchJson("/mcp/run", {
+      let args = {};
+      if (tool === "answer_finance_question") {
+        args = { query: "What is portfolio diversification?" };
+      } else if (tool === "get_stock_price") {
+        args = { symbol: dashboardContext.selectedSymbol };
+      } else if (tool === "calculate_investment") {
+        args = { initial: 10000, annual_rate: 8, years: 5 };
+      }
+      const result = await fetchJson("/external-mcp/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ tool, args }),

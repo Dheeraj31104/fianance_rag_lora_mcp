@@ -95,43 +95,37 @@ The UI should render outputs from APIs and services, not contain core finance lo
 
 ## High-Level Component Map
 
-```text
-                +----------------------+
-                |  Finance Knowledge   |
-                |  QA pairs + KB JSON  |
-                +----------+-----------+
-                           |
-                 +---------+---------+
-                 |                   |
-                 v                   v
-        +----------------+   +------------------+
-        |   RAG Layer    |   |   LoRA Layer     |
-        | TF-IDF lookup  |   | distilgpt2+LoRA  |
-        +--------+-------+   +---------+--------+
-                 |                     |
-                 +----------+----------+
-                            |
-                            v
-                   +------------------+
-                   |  Service Layer   |
-                   | P&L / Risk /     |
-                   | Events / Summary |
-                   +--------+---------+
-                            |
-              +-------------+-------------+
-              |                           |
-              v                           v
-      +---------------+           +---------------+
-      |  FastAPI API  |           | MCP Tool API  |
-      +-------+-------+           +-------+-------+
-              |                           |
-              +-------------+-------------+
-                            |
-                            v
-                    +---------------+
-                    |   Dashboard   |
-                    |  + Chat UI    |
-                    +---------------+
+```mermaid
+flowchart TD
+    FK["🗄️ Finance Knowledge\nQA pairs + KB JSON"]
+
+    FK --> RAG["📄 RAG Layer\nTF-IDF lookup"]
+    FK --> LORA["🔬 LoRA Layer\ndistilgpt2 + LoRA"]
+
+    RAG -. "compare / alternate" .-> LORA
+
+    RAG --> SVC
+    LORA --> SVC
+
+    SVC["⚙️ Service Layer\n💰 P&L  ·  ⚠️ Risk  ·  📅 Events  ·  📋 Summary\nCommentary  ·  Chat"]
+
+    HTTP["⚡ HTTP\nexternal client"] --> API
+    SVC --> API["🌐 FastAPI API"]
+    SVC -.-> MCP["🔧 MCP Tool API"]
+    AGENT["🤖 Agent /\nExternal Tool"] --> MCP
+
+    API --> UI["📊 Dashboard\n+ 💬 Chat UI"]
+    MCP --> UI
+
+    style FK    fill:#dde8f0,color:#1a2a3a,stroke:#5588aa,stroke-width:2px
+    style RAG   fill:#e6f0e8,color:#1a2e1e,stroke:#5a9e6a,stroke-width:2px
+    style LORA  fill:#eef5e8,color:#1a2e1e,stroke:#8ab86a,stroke-width:2px
+    style SVC   fill:#ede8f5,color:#1a0a30,stroke:#8866cc,stroke-width:2px
+    style API   fill:#e8edf5,color:#0a1a30,stroke:#5577bb,stroke-width:2px
+    style MCP   fill:#e8edf5,color:#0a1a30,stroke:#5577bb,stroke-width:2px
+    style HTTP  fill:#fff8e8,color:#3a2a00,stroke:#cc9922,stroke-width:1px,stroke-dasharray:4
+    style AGENT fill:#fff8e8,color:#3a2a00,stroke:#cc9922,stroke-width:1px,stroke-dasharray:4
+    style UI    fill:#e8f0e8,color:#0a2010,stroke:#44aa66,stroke-width:2px
 ```
 
 ---
@@ -151,10 +145,32 @@ test_finance_mcp.py
 app/
   main.py
   api/
+    chat.py
+    commentary.py
+    external_mcp.py        ← new
+    mcp.py
+    portfolio.py
+    qa.py
+    risk.py
+    stocks.py
   models/
   services/
+    external_mcp_client.py ← new
+    chat_service.py
+    commentary_service.py
+    market_data_service.py
+    mcp_service.py
+    news_service.py
+    pnl_service.py
+    portfolio_service.py
+    rag_service.py
+    risk_service.py
+    summary_service.py
   mcp/
+    tools.py
   static/
+    index.html
+    styles.css
 ```
 
 ### Core scripts
@@ -183,8 +199,15 @@ app/
   - Pydantic data contracts
 - [`app/services/`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/app/services)
   - portfolio, market, risk, summary, chat, and commentary services
+- [`app/api/external_mcp.py`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/app/api/external_mcp.py)
+  - FastAPI router for `/external-mcp/tools` and `/external-mcp/run`
+  - bridges HTTP requests to the standalone `finance_mcp_server.py` process via `ExternalMCPClient`
+- [`app/services/external_mcp_client.py`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/app/services/external_mcp_client.py)
+  - JSON-RPC subprocess client for `finance_mcp_server.py`
+  - spawns the server on first use, communicates over stdin/stdout, cleans up on exit
+  - supports `initialize`, `tools/list`, and `tools/call` methods
 - [`app/mcp/tools.py`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/app/mcp/tools.py)
-  - MCP tool registry for the app layer
+  - MCP tool registry for the in-process app layer
 - [`app/static/index.html`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/app/static/index.html)
   - dashboard frontend
 
@@ -234,7 +257,12 @@ The service layer is the backbone of the app.
 - answers contextual dashboard questions using portfolio state, events, and finance explanations
 
 #### MCP service
-- exposes selected capabilities as callable tools
+- exposes selected in-process capabilities as callable tools via `/mcp`
+
+#### External MCP client service
+- spawns `finance_mcp_server.py` as a subprocess on first use
+- communicates via stdin/stdout JSON-RPC (initialize → tools/list → tools/call)
+- exposed through `/external-mcp` endpoints so the dashboard can call standalone MCP tools without browser-level subprocess access
 
 ---
 
@@ -252,9 +280,36 @@ It demonstrates:
 - events
 - commentary
 - contextual chat
-- direct MCP tool actions
+- external MCP tool actions (Stock Price, Investment Math, Finance Q&A) routed through `/external-mcp/run`
+
+The MCP action card was updated to call the external MCP endpoint (`/external-mcp/run`) instead of the in-process MCP endpoint. Tool arguments are now context-aware: `get_stock_price` passes the currently selected symbol from the dashboard state.
 
 The frontend should be thought of as a prototype consumer of the backend, not a finalized product UI.
+
+---
+
+## Dashboard Preview
+
+If you save a dashboard screenshot to `docs/dashboard-preview.png`, this section will render it directly in GitHub:
+
+```markdown
+![Dashboard Preview](docs/dashboard-preview.png)
+```
+
+Current preview intent:
+
+- headline portfolio summary
+- daily P&L hero card
+- top-level NAV, cash, return, and unrealized P&L stats
+- positions table
+- P&L attribution table
+- additional lower sections for risk, allocation, drilldown, chat, and MCP actions
+
+Recommended repository path for the screenshot:
+
+```text
+docs/dashboard-preview.png
+```
 
 ---
 
@@ -458,6 +513,14 @@ python finance_compare.py --json
 - `GET /mcp/tools`
 - `POST /mcp/run`
 
+### External MCP
+- `GET /external-mcp/tools`
+- `POST /external-mcp/run`
+
+The external MCP endpoints start and talk to the standalone
+[`finance_mcp_server.py`](/Users/dheerajkaranam/Projects/Finance_analyitcs/fianance_rag_lora_mcp/finance_mcp_server.py)
+process through a subprocess JSON-RPC client. This gives the FastAPI app a way to call external tool capabilities without requiring the browser to interact with MCP directly.
+
 ---
 
 ## Verification
@@ -477,6 +540,7 @@ curl -s http://127.0.0.1:8000/risk/report
 curl -s http://127.0.0.1:8000/portfolio/allocation
 curl -s http://127.0.0.1:8000/stocks/AAPL/drilldown
 curl -s http://127.0.0.1:8000/mcp/tools
+curl -s http://127.0.0.1:8000/external-mcp/tools
 curl -s http://127.0.0.1:8000/chat -X POST -H "Content-Type: application/json" -d '{"message":"Why is my portfolio moving today?","symbol":"AAPL"}'
 ```
 
